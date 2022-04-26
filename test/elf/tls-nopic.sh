@@ -1,22 +1,29 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-if [ $(uname -m) = x86_64 ]; then
+if [ $MACHINE = x86_64 ]; then
   dialect=gnu
-elif [ $(uname -m) = aarch64 ]; then
+elif [ $MACHINE = aarch64 ]; then
   dialect=trad
 else
   echo skipped
-  exit 0
+  exit
 fi
 
-cat <<EOF | gcc -mtls-dialect=$dialect -c -o $t/a.o -xc -
+cat <<EOF | $GCC -mtls-dialect=$dialect -c -o $t/a.o -xc -
 #include <stdio.h>
 
 extern _Thread_local int foo;
@@ -34,11 +41,11 @@ int main() {
 }
 EOF
 
-cat <<EOF | cc -xc -c -o $t/b.o -
+cat <<EOF | $CC -xc -c -o $t/b.o -
 _Thread_local int foo;
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/a.o $t/b.o
-$t/exe | grep -q '3 5 3 5'
+$CC -B. -o $t/exe $t/a.o $t/b.o
+$QEMU $t/exe | grep -q '3 5 3 5'
 
 echo OK

@@ -1,33 +1,41 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | clang -c -o $t/a.o -xc -
+cat <<EOF | $CC -c -o $t/a.o -xc -
 void foo() {}
 EOF
 
-clang -fuse-ld=$mold -shared -o $t/libfoo.so $t/a.o -Wl,--soname,libfoo
-clang -fuse-ld=$mold -shared -o $t/libbar.so $t/a.o
+$CC -B. -shared -o $t/libfoo.so $t/a.o -Wl,--soname,libfoo
+$CC -B. -shared -o $t/libbar.so $t/a.o
 
-cat <<EOF | clang -c -o $t/b.o -xc -
-int main() {}
+cat <<EOF | $CC -c -o $t/b.o -xc -
+void foo();
+int main() { foo(); }
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/b.o $t/libfoo.so
+$CC -B. -o $t/exe $t/b.o $t/libfoo.so
 readelf --dynamic $t/exe | fgrep -q 'Shared library: [libfoo]'
 
-clang -fuse-ld=$mold -o $t/exe $t/b.o -L $t -lfoo
+$CC -B. -o $t/exe $t/b.o -L $t -lfoo
 readelf --dynamic $t/exe | fgrep -q 'Shared library: [libfoo]'
 
-clang -fuse-ld=$mold -o $t/exe $t/b.o $t/libbar.so
-readelf --dynamic $t/exe | grep -Pq 'Shared library: \[.*dt-needed/libbar\.so\]'
+$CC -B. -o $t/exe $t/b.o $t/libbar.so
+readelf --dynamic $t/exe | grep -Eq 'Shared library: \[.*dt-needed/libbar\.so\]'
 
-clang -fuse-ld=$mold -o $t/exe $t/b.o -L$t -lbar
+$CC -B. -o $t/exe $t/b.o -L$t -lbar
 readelf --dynamic $t/exe | fgrep -q 'Shared library: [libbar.so]'
 
 echo OK

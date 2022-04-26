@@ -1,18 +1,25 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../ld64.mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/macho/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/ld64.mold"
+t=out/test/macho/$testname
 mkdir -p $t
 
-cat <<EOF | cc -o $t/a.o -fcommon -c -xc -
+cat <<EOF | $CC -o $t/a.o -fcommon -c -xc -
 int foo;
 __attribute__((aligned(4096))) int bar;
 EOF
 
-cat <<EOF | cc -o $t/b.o -c -xc -
+cat <<EOF | $CC -o $t/b.o -c -xc -
 #include <stdio.h>
 #include <stdint.h>
 
@@ -24,7 +31,7 @@ int main() {
 }
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/a.o $t/b.o
-$t/exe | grep -q '^0 0$'
+clang -fuse-ld="$mold" -o $t/exe $t/a.o $t/b.o
+$QEMU $t/exe | grep -q '^0 0$'
 
 echo OK

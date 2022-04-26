@@ -1,27 +1,34 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
 # Skip if target is not x86-64
-[ $(uname -m) = x86_64 ] || { echo skipped; exit; }
+[ $MACHINE = x86_64 ] || { echo skipped; exit; }
 
-cat <<EOF | clang -fcf-protection=branch -c -o $t/a.o -xc -
+cat <<EOF | $CC -fcf-protection=branch -c -o $t/a.o -xc -
 void _start() {}
 EOF
 
-cat <<EOF | clang -fcf-protection=none -c -o $t/b.o -xc -
+cat <<EOF | $CC -fcf-protection=none -c -o $t/b.o -xc -
 void _start() {}
 EOF
 
-$mold -o $t/exe $t/a.o
+"$mold" -o $t/exe $t/a.o
 readelf -n $t/exe | grep -q 'x86 feature: IBT'
 
-$mold -o $t/exe $t/b.o
+"$mold" -o $t/exe $t/b.o
 ! readelf -n $t/exe | grep -q 'x86 feature: IBT' || false
 
 echo OK

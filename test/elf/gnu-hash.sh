@@ -1,20 +1,25 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | c++ -o $t/exe -Wl,-hash-style=gnu -xc++ -
-#include <iostream>
-
-int main() {
-  std::cout << "foo\n";
-}
+cat <<EOF | $CC -c -o $t/a.o -xc -
+void foo() {}
+void bar() {}
+static void baz() {}
 EOF
 
-$t/exe | grep -q foo
+$CC -B. -o $t/b.so $t/a.o -Wl,-hash-style=gnu -shared
 
 echo OK

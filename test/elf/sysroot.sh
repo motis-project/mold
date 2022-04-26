@@ -1,17 +1,24 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | clang -c -o $t/a.o -xc -
+cat <<EOF | $CC -c -o $t/a.o -xc -
 void foo() {}
 EOF
 
-cat <<EOF | clang -c -o $t/b.o -xc -
+cat <<EOF | $CC -c -o $t/b.o -xc -
 void bar() {}
 EOF
 
@@ -19,28 +26,28 @@ mkdir -p $t/foo/bar
 rm -f $t/foo/bar/libfoo.a
 ar rcs $t/foo/bar/libfoo.a $t/a.o $t/b.o
 
-cat <<EOF | clang -c -o $t/c.o -xc -
+cat <<EOF | $CC -c -o $t/c.o -xc -
 void foo();
 int main() {
   foo();
 }
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/c.o -Wl,--sysroot=$t/ \
+$CC -B. -o $t/exe $t/c.o -Wl,--sysroot=$t/ \
   -Wl,-L=foo/bar -lfoo
 
-clang -fuse-ld=$mold -o $t/exe $t/c.o -Wl,--sysroot=$t/ \
+$CC -B. -o $t/exe $t/c.o -Wl,--sysroot=$t/ \
   -Wl,-L=/foo/bar -lfoo
 
-clang -fuse-ld=$mold -o $t/exe $t/c.o -Wl,--sysroot=$t/ \
+$CC -B. -o $t/exe $t/c.o -Wl,--sysroot=$t/ \
   '-Wl,-L$SYSROOTfoo/bar' -lfoo
 
-clang -fuse-ld=$mold -o $t/exe $t/c.o -Wl,--sysroot=$t/ \
+$CC -B. -o $t/exe $t/c.o -Wl,--sysroot=$t/ \
   '-Wl,-L$SYSROOT/foo/bar' -lfoo
 
-! clang -fuse-ld=$mold -o $t/exe $t/c.o -lfoo >& /dev/null
+! $CC -B. -o $t/exe $t/c.o -lfoo >& /dev/null
 
-! clang -fuse-ld=$mold -o $t/exe $t/c.o -Wl,--sysroot=$t \
+! $CC -B. -o $t/exe $t/c.o -Wl,--sysroot=$t \
   -Wl,-Lfoo/bar -lfoo >& /dev/null
 
 echo OK

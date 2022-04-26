@@ -1,15 +1,22 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
 mkdir -p $t/foo
 
-cat <<EOF | cc -o $t/foo/a.o -c -xc -
+cat <<EOF | $CC -o $t/foo/a.o -c -xc -
 int main() {}
 EOF
 
@@ -17,6 +24,6 @@ cat <<EOF > $t/b.script
 INPUT(a.o)
 EOF
 
-clang -o $t/exe -L$t/foo $t/b.script
+$CC -o $t/exe -L$t/foo $t/b.script
 
 echo OK

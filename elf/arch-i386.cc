@@ -2,31 +2,22 @@
 
 namespace mold::elf {
 
-template <>
-void GotPltSection<I386>::copy_buf(Context<I386> &ctx) {
-  u32 *buf = (u32 *)(ctx.buf + this->shdr.sh_offset);
+using E = I386;
 
-  // The first slot of .got.plt points to _DYNAMIC.
-  buf[0] = ctx.dynamic ? ctx.dynamic->shdr.sh_addr : 0;
-  buf[1] = 0;
-  buf[2] = 0;
-
-  for (Symbol<I386> *sym : ctx.plt->symbols)
-    buf[sym->get_gotplt_idx(ctx)] = sym->get_plt_addr(ctx) + 6;
-}
-
-static void write_plt_header(Context<I386> &ctx, u8 *buf) {
+static void write_plt_header(Context<E> &ctx, u8 *buf) {
   if (ctx.arg.pic) {
     static const u8 plt0[] = {
-      0xff, 0xb3, 0x04, 0, 0, 0, // pushl 4(%ebx)
-      0xff, 0xa3, 0x08, 0, 0, 0, // jmp *8(%ebx)
-      0x90, 0x90, 0x90, 0x90,    // nop
+      0xff, 0xb3, 0, 0, 0, 0, // pushl GOTPLT+4(%ebx)
+      0xff, 0xa3, 0, 0, 0, 0, // jmp *GOTPLT+8(%ebx)
+      0x90, 0x90, 0x90, 0x90, // nop
     };
     memcpy(buf, plt0, sizeof(plt0));
+    *(u32 *)(buf + 2) = ctx.gotplt->shdr.sh_addr - ctx.got->shdr.sh_addr + 4;
+    *(u32 *)(buf + 8) = ctx.gotplt->shdr.sh_addr - ctx.got->shdr.sh_addr + 8;
   } else {
     static const u8 plt0[] = {
-      0xff, 0x35, 0, 0, 0, 0, // pushl (GOTPLT+4)
-      0xff, 0x25, 0, 0, 0, 0, // jmp *(GOTPLT+8)
+      0xff, 0x35, 0, 0, 0, 0, // pushl GOTPLT+4
+      0xff, 0x25, 0, 0, 0, 0, // jmp *GOTPLT+8
       0x90, 0x90, 0x90, 0x90, // nop
     };
     memcpy(buf, plt0, sizeof(plt0));
@@ -35,9 +26,9 @@ static void write_plt_header(Context<I386> &ctx, u8 *buf) {
   }
 }
 
-static void write_plt_entry(Context<I386> &ctx, u8 *buf, Symbol<I386> &sym,
+static void write_plt_entry(Context<E> &ctx, u8 *buf, Symbol<E> &sym,
                             i64 idx) {
-  u8 *ent = buf + sym.get_plt_idx(ctx) * I386::plt_size;
+  u8 *ent = buf + ctx.plt_hdr_size + sym.get_plt_idx(ctx) * ctx.plt_size;
 
   if (ctx.arg.pic) {
     static const u8 data[] = {
@@ -46,7 +37,7 @@ static void write_plt_entry(Context<I386> &ctx, u8 *buf, Symbol<I386> &sym,
       0xe9, 0,    0, 0, 0,    // jmp .PLT0@PC
     };
     memcpy(ent, data, sizeof(data));
-    *(u32 *)(ent + 2) = sym.get_gotplt_addr(ctx) - ctx.gotplt->shdr.sh_addr;
+    *(u32 *)(ent + 2) = sym.get_gotplt_addr(ctx) - ctx.got->shdr.sh_addr;
   } else {
     static const u8 data[] = {
       0xff, 0x25, 0, 0, 0, 0, // jmp *foo@GOT
@@ -57,12 +48,12 @@ static void write_plt_entry(Context<I386> &ctx, u8 *buf, Symbol<I386> &sym,
     *(u32 *)(ent + 2) = sym.get_gotplt_addr(ctx);
   }
 
-  *(u32 *)(ent + 7) = idx * sizeof(ElfRel<I386>);
+  *(u32 *)(ent + 7) = idx * sizeof(ElfRel<E>);
   *(u32 *)(ent + 12) = ctx.plt->shdr.sh_addr - sym.get_plt_addr(ctx) - 16;
 }
 
 template <>
-void PltSection<I386>::copy_buf(Context<I386> &ctx) {
+void PltSection<E>::copy_buf(Context<E> &ctx) {
   u8 *buf = ctx.buf + this->shdr.sh_offset;
   write_plt_header(ctx, buf);
 
@@ -71,7 +62,7 @@ void PltSection<I386>::copy_buf(Context<I386> &ctx) {
 }
 
 template <>
-void PltGotSection<I386>::copy_buf(Context<I386> &ctx) {
+void PltGotSection<E>::copy_buf(Context<E> &ctx) {
   u8 *buf = ctx.buf + this->shdr.sh_offset;
 
   if (ctx.arg.pic) {
@@ -83,7 +74,7 @@ void PltGotSection<I386>::copy_buf(Context<I386> &ctx) {
     for (i64 i = 0; i < symbols.size(); i++) {
       u8 *ent = buf + i * sizeof(data);
       memcpy(ent, data, sizeof(data));
-      *(u32 *)(ent + 2) = symbols[i]->get_got_addr(ctx) - ctx.gotplt->shdr.sh_addr;
+      *(u32 *)(ent + 2) = symbols[i]->get_got_addr(ctx) - ctx.got->shdr.sh_addr;
     }
   } else {
     static const u8 data[] = {
@@ -100,45 +91,44 @@ void PltGotSection<I386>::copy_buf(Context<I386> &ctx) {
 }
 
 template <>
-void EhFrameSection<I386>::apply_reloc(Context<I386> &ctx,
-                                       ElfRel<I386> &rel,
-                                       u64 loc, u64 val) {
-  u8 *base = ctx.buf + this->shdr.sh_offset;
+void EhFrameSection<E>::apply_reloc(Context<E> &ctx, ElfRel<E> &rel,
+                                    u64 offset, u64 val) {
+  u8 *loc = ctx.buf + this->shdr.sh_offset + offset;
 
   switch (rel.r_type) {
   case R_386_NONE:
     return;
   case R_386_32:
-    *(u32 *)(base + loc) = val;
+    *(u32 *)loc = val;
     return;
   case R_386_PC32:
-    *(u32 *)(base + loc) = val - this->shdr.sh_addr - loc;
+    *(u32 *)loc = val - this->shdr.sh_addr - offset;
     return;
   }
   unreachable();
 }
 
 template <>
-void InputSection<I386>::apply_reloc_alloc(Context<I386> &ctx, u8 *base) {
-  ElfRel<I386> *dynrel = nullptr;
-  std::span<ElfRel<I386>> rels = get_rels(ctx);
+void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
+  ElfRel<E> *dynrel = nullptr;
+  std::span<ElfRel<E>> rels = get_rels(ctx);
   i64 frag_idx = 0;
 
   if (ctx.reldyn)
-    dynrel = (ElfRel<I386> *)(ctx.buf + ctx.reldyn->shdr.sh_offset +
+    dynrel = (ElfRel<E> *)(ctx.buf + ctx.reldyn->shdr.sh_offset +
                               file.reldyn_offset + this->reldyn_offset);
 
   for (i64 i = 0; i < rels.size(); i++) {
-    const ElfRel<I386> &rel = rels[i];
+    const ElfRel<E> &rel = rels[i];
     if (rel.r_type == R_386_NONE)
       continue;
 
-    Symbol<I386> &sym = *file.symbols[rel.r_sym];
+    Symbol<E> &sym = *file.symbols[rel.r_sym];
     u8 *loc = base + rel.r_offset;
 
-    const SectionFragmentRef<I386> *ref = nullptr;
+    const SectionFragmentRef<E> *frag_ref = nullptr;
     if (rel_fragments && rel_fragments[frag_idx].idx == i)
-      ref = &rel_fragments[frag_idx++];
+      frag_ref = &rel_fragments[frag_idx++];
 
     auto overflow_check = [&](i64 val, i64 lo, i64 hi) {
       if (val < lo || hi <= val)
@@ -167,23 +157,15 @@ void InputSection<I386>::apply_reloc_alloc(Context<I386> &ctx, u8 *base) {
       *(u16 *)loc = val;
     };
 
-#define S      (ref ? ref->frag->get_addr(ctx) : sym.get_addr(ctx))
-#define A      (ref ? ref->addend : this->get_addend(rel))
-#define P      (output_section->shdr.sh_addr + offset + rel.r_offset)
-#define G      (sym.get_got_addr(ctx) - ctx.got->shdr.sh_addr)
-#define GOTPLT ctx.gotplt->shdr.sh_addr
+    auto write32 = [&](u64 val) {
+      *(u32 *)loc = val;
+    };
 
-    if (needs_dynrel[i]) {
-      *dynrel++ = {P, R_386_32, (u32)sym.get_dynsym_idx(ctx)};
-      *(u32 *)loc = A;
-      continue;
-    }
-
-    if (needs_baserel[i]) {
-      *dynrel++ = {P, R_386_RELATIVE, 0};
-      *(u32 *)loc = S + A;
-      continue;
-    }
+#define S   (frag_ref ? frag_ref->frag->get_addr(ctx) : sym.get_addr(ctx))
+#define A   (frag_ref ? frag_ref->addend : this->get_addend(rel))
+#define P   (output_section->shdr.sh_addr + offset + rel.r_offset)
+#define G   (sym.get_got_addr(ctx) - ctx.got->shdr.sh_addr)
+#define GOT ctx.got->shdr.sh_addr
 
     switch (rel.r_type) {
     case R_386_8:
@@ -193,7 +175,16 @@ void InputSection<I386>::apply_reloc_alloc(Context<I386> &ctx, u8 *base) {
       write16(S + A);
       continue;
     case R_386_32:
-      *(u32 *)loc = S + A;
+      if (sym.is_absolute() || !ctx.arg.pic) {
+        write32(S + A);
+      } else if (sym.is_imported) {
+        *dynrel++ = {P, R_386_32, (u32)sym.get_dynsym_idx(ctx)};
+        write32(A);
+      } else {
+        if (!is_relr_reloc(ctx, rel))
+          *dynrel++ = {P, R_386_RELATIVE, 0};
+        write32(S + A);
+      }
       continue;
     case R_386_PC8:
       write8s(S + A);
@@ -202,39 +193,105 @@ void InputSection<I386>::apply_reloc_alloc(Context<I386> &ctx, u8 *base) {
       write16s(S + A);
       continue;
     case R_386_PC32:
+      if (sym.is_absolute() || !sym.is_imported || !ctx.arg.shared) {
+        write32(S + A - P);
+      } else {
+        *dynrel++ = {P, R_386_32, (u32)sym.get_dynsym_idx(ctx)};
+        write32(A);
+      }
+      continue;
     case R_386_PLT32:
-      *(u32 *)loc = S + A - P;
+      write32(S + A - P);
       continue;
     case R_386_GOT32:
     case R_386_GOT32X:
-      *(u32 *)loc = sym.get_got_addr(ctx) + A - GOTPLT;
+      write32(G + A);
       continue;
     case R_386_GOTOFF:
-      *(u32 *)loc = S + A - GOTPLT;
+      write32(S + A - GOT);
       continue;
     case R_386_GOTPC:
-      *(u32 *)loc = GOTPLT + A - P;
+      write32(GOT + A - P);
       continue;
     case R_386_TLS_GOTIE:
-      *(u32 *)loc = sym.get_gottp_addr(ctx) + A - GOTPLT;
+      write32(sym.get_gottp_addr(ctx) + A - GOT);
       continue;
     case R_386_TLS_LE:
-      *(u32 *)loc = S + A - ctx.tls_end;
+      write32(S + A - ctx.tls_end);
       continue;
     case R_386_TLS_IE:
-      *(u32 *)loc = sym.get_gottp_addr(ctx) + A;
+      write32(sym.get_gottp_addr(ctx) + A);
       continue;
     case R_386_TLS_GD:
-      *(u32 *)loc = sym.get_tlsgd_addr(ctx) + A - GOTPLT;
+      if (sym.get_tlsgd_idx(ctx) == -1) {
+        // Relax GD to LE
+        switch (rels[i + 1].r_type) {
+        case R_386_PLT32: {
+          static const u8 insn[] = {
+            0x65, 0xa1, 0, 0, 0, 0, // mov %gs:0, %rax
+            0x81, 0xe8, 0, 0, 0, 0, // add $0, %rax
+          };
+          memcpy(loc - 3, insn, sizeof(insn));
+          *(u32 *)(loc + 5) = ctx.tls_end - S - A;
+          break;
+        }
+        case R_386_GOT32: {
+          static const u8 insn[] = {
+            0x65, 0xa1, 0, 0, 0, 0, // mov %gs:0, %rax
+            0x81, 0xe8, 0, 0, 0, 0, // add $0, %rax
+          };
+          memcpy(loc - 2, insn, sizeof(insn));
+          *(u32 *)(loc + 6) = ctx.tls_end - S - A;
+          break;
+        }
+        default:
+          unreachable();
+        }
+
+        i++;
+      } else {
+        write32(sym.get_tlsgd_addr(ctx) + A - GOT);
+      }
       continue;
     case R_386_TLS_LDM:
-      *(u32 *)loc = ctx.got->get_tlsld_addr(ctx) + A - GOTPLT;
+      if (ctx.got->tlsld_idx == -1) {
+        // Relax LD to LE
+        switch (rels[i + 1].r_type) {
+        case R_386_PLT32: {
+          static const u8 insn[] = {
+            0x65, 0xa1, 0, 0, 0, 0, // mov %gs:0, %eax
+            0x8d, 0x74, 0x26, 0x00, // lea (%esi,1), %esi
+            0x90,                   // nop
+          };
+          memcpy(loc - 2, insn, sizeof(insn));
+          break;
+        }
+        case R_386_GOT32: {
+          static const u8 insn[] = {
+            0x65, 0xa1, 0, 0, 0, 0, // mov %gs:0, %eax
+            0x8d, 0x74, 0x26, 0x00, // lea (%esi,1), %esi
+            0x66, 0x90,
+          };
+          memcpy(loc - 2, insn, sizeof(insn));
+          break;
+        }
+        default:
+          unreachable();
+        }
+
+        i++;
+      } else {
+        write32(ctx.got->get_tlsld_addr(ctx) + A - GOT);
+      }
       continue;
     case R_386_TLS_LDO_32:
-      *(u32 *)loc = S + A - ctx.tls_begin;
+      if (ctx.got->tlsld_idx == -1)
+        write32(S + A - ctx.tls_end);
+      else
+        write32(S + A - ctx.tls_begin);
       continue;
     case R_386_SIZE32:
-      *(u32 *)loc = sym.esym().st_size + A;
+      write32(sym.esym().st_size + A);
       continue;
     case R_386_TLS_GOTDESC:
       if (sym.get_tlsdesc_idx(ctx) == -1) {
@@ -242,9 +299,9 @@ void InputSection<I386>::apply_reloc_alloc(Context<I386> &ctx, u8 *base) {
           0x8d, 0x05, 0, 0, 0, 0, // lea 0, %eax
         };
         memcpy(loc - 2, insn, sizeof(insn));
-        *(u32 *)loc = S + A - ctx.tls_end;
+        write32(S + A - ctx.tls_end);
       } else {
-        *(u32 *)loc = sym.get_tlsdesc_addr(ctx) + A - GOTPLT;
+        write32(sym.get_tlsdesc_addr(ctx) + A - GOT);
       }
       continue;
     case R_386_TLS_DESC_CALL:
@@ -262,31 +319,30 @@ void InputSection<I386>::apply_reloc_alloc(Context<I386> &ctx, u8 *base) {
 #undef A
 #undef P
 #undef G
-#undef GOTPLT
+#undef GOT
   }
 }
 
 template <>
-void InputSection<I386>::apply_reloc_nonalloc(Context<I386> &ctx, u8 *base) {
-  std::span<ElfRel<I386>> rels = get_rels(ctx);
-  i64 frag_idx = 0;
+void InputSection<E>::apply_reloc_nonalloc(Context<E> &ctx, u8 *base) {
+  std::span<ElfRel<E>> rels = get_rels(ctx);
 
   for (i64 i = 0; i < rels.size(); i++) {
-    const ElfRel<I386> &rel = rels[i];
+    const ElfRel<E> &rel = rels[i];
     if (rel.r_type == R_386_NONE)
       continue;
 
-    Symbol<I386> &sym = *file.symbols[rel.r_sym];
+    Symbol<E> &sym = *file.symbols[rel.r_sym];
     u8 *loc = base + rel.r_offset;
 
     if (!sym.file) {
-      report_undef(ctx, sym);
+      report_undef(ctx, file, sym);
       continue;
     }
 
-    const SectionFragmentRef<I386> *ref = nullptr;
-    if (rel_fragments && rel_fragments[frag_idx].idx == i)
-      ref = &rel_fragments[frag_idx++];
+    SectionFragment<E> *frag;
+    i64 addend;
+    std::tie(frag, addend) = get_fragment(ctx, rel);
 
     auto overflow_check = [&](i64 val, i64 lo, i64 hi) {
       if (val < lo || hi <= val)
@@ -315,10 +371,10 @@ void InputSection<I386>::apply_reloc_nonalloc(Context<I386> &ctx, u8 *base) {
       *(u16 *)loc = val;
     };
 
-#define S      (ref ? ref->frag->get_addr(ctx) : sym.get_addr(ctx))
-#define A      (ref ? ref->addend : this->get_addend(rel))
-#define G      (sym.get_got_addr(ctx) - ctx.got->shdr.sh_addr)
-#define GOTPLT ctx.gotplt->shdr.sh_addr
+#define S   (frag ? frag->get_addr(ctx) : sym.get_addr(ctx))
+#define A   (frag ? addend : this->get_addend(rel))
+#define G   (sym.get_got_addr(ctx) - ctx.got->shdr.sh_addr)
+#define GOT ctx.got->shdr.sh_addr
 
     switch (rel.r_type) {
     case R_386_8:
@@ -328,7 +384,10 @@ void InputSection<I386>::apply_reloc_nonalloc(Context<I386> &ctx, u8 *base) {
       write16(S + A);
       continue;
     case R_386_32:
-      *(u32 *)loc = S + A;
+      if (std::optional<u64> val = get_tombstone(sym))
+        *(u32 *)loc = *val;
+      else
+        *(u32 *)loc = S + A;
       continue;
     case R_386_PC8:
       write8s(S + A);
@@ -340,13 +399,16 @@ void InputSection<I386>::apply_reloc_nonalloc(Context<I386> &ctx, u8 *base) {
       *(u32 *)loc = S + A;
       continue;
     case R_386_GOTPC:
-      *(u32 *)loc = GOTPLT + A;
+      *(u32 *)loc = GOT + A;
       continue;
     case R_386_GOTOFF:
-      *(u32 *)loc = S + A - GOTPLT;
+      *(u32 *)loc = S + A - GOT;
       continue;
     case R_386_TLS_LDO_32:
-      *(u32 *)loc = S + A - ctx.tls_begin;
+      if (std::optional<u64> val = get_tombstone(sym))
+        *(u32 *)loc = *val;
+      else
+        *(u32 *)loc = S + A - ctx.tls_begin;
       continue;
     case R_386_SIZE32:
       *(u32 *)loc = sym.esym().st_size + A;
@@ -357,29 +419,27 @@ void InputSection<I386>::apply_reloc_nonalloc(Context<I386> &ctx, u8 *base) {
 
 #undef S
 #undef A
-#undef GOTPLT
+#undef GOT
   }
 }
 
 template <>
-void InputSection<I386>::scan_relocations(Context<I386> &ctx) {
-  assert(shdr.sh_flags & SHF_ALLOC);
+void InputSection<E>::scan_relocations(Context<E> &ctx) {
+  assert(shdr().sh_flags & SHF_ALLOC);
 
-  this->reldyn_offset = file.num_dynrel * sizeof(ElfRel<I386>);
-  std::span<ElfRel<I386>> rels = get_rels(ctx);
-  bool is_writable = (shdr.sh_flags & SHF_WRITE);
+  this->reldyn_offset = file.num_dynrel * sizeof(ElfRel<E>);
+  std::span<ElfRel<E>> rels = get_rels(ctx);
 
   // Scan relocations
   for (i64 i = 0; i < rels.size(); i++) {
-    const ElfRel<I386> &rel = rels[i];
+    const ElfRel<E> &rel = rels[i];
     if (rel.r_type == R_386_NONE)
       continue;
 
-    Symbol<I386> &sym = *file.symbols[rel.r_sym];
-    u8 *loc = (u8 *)(contents.data() + rel.r_offset);
+    Symbol<E> &sym = *file.symbols[rel.r_sym];
 
     if (!sym.file) {
-      report_undef(ctx, sym);
+      report_undef(ctx, file, sym);
       continue;
     }
 
@@ -395,7 +455,7 @@ void InputSection<I386>::scan_relocations(Context<I386> &ctx) {
         // Absolute  Local  Imported data  Imported code
         {  NONE,     ERROR, ERROR,         ERROR },      // DSO
         {  NONE,     ERROR, ERROR,         ERROR },      // PIE
-        {  NONE,     NONE,  COPYREL,       PLT   },      // PDE
+        {  NONE,     NONE,  COPYREL,       CPLT  },      // PDE
       };
       dispatch(ctx, table, i, rel, sym);
       break;
@@ -405,7 +465,7 @@ void InputSection<I386>::scan_relocations(Context<I386> &ctx) {
         // Absolute  Local    Imported data  Imported code
         {  NONE,     BASEREL, DYNREL,        DYNREL },     // DSO
         {  NONE,     BASEREL, DYNREL,        DYNREL },     // PIE
-        {  NONE,     NONE,    COPYREL,       PLT },        // PDE
+        {  NONE,     NONE,    COPYREL,       CPLT   },     // PDE
       };
       dispatch(ctx, table, i, rel, sym);
       break;
@@ -424,9 +484,9 @@ void InputSection<I386>::scan_relocations(Context<I386> &ctx) {
     case R_386_PC32: {
       Action table[][4] = {
         // Absolute  Local  Imported data  Imported code
-        {  BASEREL,  NONE,  ERROR,         ERROR },      // DSO
-        {  BASEREL,  NONE,  COPYREL,       PLT   },      // PIE
-        {  NONE,     NONE,  COPYREL,       PLT   },      // PDE
+        {  ERROR,    NONE,  DYNREL,        DYNREL },     // DSO
+        {  ERROR,    NONE,  COPYREL,       PLT    },     // PIE
+        {  NONE,     NONE,  COPYREL,       PLT    },     // PDE
       };
       dispatch(ctx, table, i, rel, sym);
       break;
@@ -436,20 +496,46 @@ void InputSection<I386>::scan_relocations(Context<I386> &ctx) {
     case R_386_GOTPC:
       sym.flags |= NEEDS_GOT;
       break;
-    case R_386_PLT32:
-      if (sym.is_imported)
-        sym.flags |= NEEDS_PLT;
+    case R_386_PLT32: {
+      Action table[][4] = {
+        // Absolute  Local  Imported data  Imported code
+        {  NONE,     NONE,  PLT,           PLT    },     // DSO
+        {  NONE,     NONE,  PLT,           PLT    },     // PIE
+        {  NONE,     NONE,  PLT,           PLT    },     // PDE
+      };
+      dispatch(ctx, table, i, rel, sym);
       break;
+    }
     case R_386_TLS_GOTIE:
     case R_386_TLS_LE:
     case R_386_TLS_IE:
       sym.flags |= NEEDS_GOTTP;
       break;
     case R_386_TLS_GD:
-      sym.flags |= NEEDS_TLSGD;
+      if (i + 1 == rels.size())
+        Fatal(ctx) << *this << ": TLS_GD reloc must be followed by PLT or GOT32";
+
+      if (u32 ty = rels[i + 1].r_type;
+          ty != R_386_PLT32 && ty != R_386_GOT32)
+        Fatal(ctx) << *this << ": TLS_GD reloc must be followed by PLT or GOT32";
+
+      if (ctx.arg.relax && !ctx.arg.shared && !sym.is_imported)
+        i++;
+      else
+        sym.flags |= NEEDS_TLSGD;
       break;
     case R_386_TLS_LDM:
-      sym.flags |= NEEDS_TLSLD;
+      if (i + 1 == rels.size())
+        Fatal(ctx) << *this << ": TLS_LDM reloc must be followed by PLT or GOT32";
+
+      if (u32 ty = rels[i + 1].r_type;
+          ty != R_386_PLT32 && ty != R_386_GOT32)
+        Fatal(ctx) << *this << ": TLS_LDM reloc must be followed by PLT or GOT32";
+
+      if (ctx.arg.relax && !ctx.arg.shared)
+        i++;
+      else
+        ctx.needs_tlsld = true;
       break;
     case R_386_TLS_GOTDESC:
       if (!ctx.arg.relax || ctx.arg.shared)

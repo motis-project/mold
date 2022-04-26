@@ -1,17 +1,27 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-# Skip if libc is musl because musl does not support GNU FUNC
-echo 'int main() {}' | cc -o $t/exe -xc -
-ldd $t/exe | grep -q ld-musl && { echo OK; exit; }
+# IFUNC is not supported on RISC-V yet
+[ $MACHINE = riscv64 ] && { echo skipped; exit; }
 
-cat <<EOF | cc -c -fPIC -o $t/a.o -xc -
+# Skip if libc is musl because musl does not support GNU FUNC
+echo 'int main() {}' | $CC -o $t/exe -xc -
+readelf --dynamic $t/exe | grep -q ld-musl && { echo OK; exit; }
+
+cat <<EOF | $CC -c -fPIC -o $t/a.o -xc -
 #include <stdio.h>
 
 __attribute__((ifunc("resolve_foobar")))
@@ -28,7 +38,7 @@ Func *resolve_foobar(void) {
 }
 EOF
 
-clang -fuse-ld=$mold -shared -o $t/b.so $t/a.o
-readelf --dyn-syms $t/b.so | grep -Pq '(IFUNC|<OS specific>: 10)\s+GLOBAL DEFAULT   \d+ foobar'
+$CC -B. -shared -o $t/b.so $t/a.o
+readelf --dyn-syms $t/b.so | grep -Eq '(IFUNC|<OS specific>: 10)\s+GLOBAL DEFAULT   .* foobar'
 
 echo OK

@@ -1,19 +1,26 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | clang -fcommon -xc -c -o $t/a.o -
+cat <<EOF | $CC -fcommon -xc -c -o $t/a.o -
 int foo;
 int bar;
 int baz = 42;
 EOF
 
-cat <<EOF | clang -fcommon -xc -c -o $t/b.o -
+cat <<EOF | $CC -fcommon -xc -c -o $t/b.o -
 #include <stdio.h>
 
 int foo;
@@ -25,8 +32,8 @@ int main() {
 }
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/a.o $t/b.o
-$t/exe | grep -q '0 5 42'
+$CC -B. -o $t/exe $t/a.o $t/b.o
+$QEMU $t/exe | grep -q '0 5 42'
 
 readelf --sections $t/exe > $t/log
 grep -q '.common .*NOBITS' $t/log

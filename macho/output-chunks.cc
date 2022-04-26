@@ -1,15 +1,8 @@
 #include "mold.h"
+#include "../sha.h"
 
 #include <shared_mutex>
 #include <sys/mman.h>
-
-#ifdef __APPLE__
-#  define COMMON_DIGEST_FOR_OPENSSL
-#  include <CommonCrypto/CommonDigest.h>
-#  define SHA256(data, len, md) CC_SHA256(data, len, md)
-#else
-#  include <openssl/sha.h>
-#endif
 
 namespace mold::macho {
 
@@ -151,7 +144,7 @@ static std::vector<u8> create_main_cmd(Context<E> &ctx) {
 
   cmd.cmd = LC_MAIN;
   cmd.cmdsize = buf.size();
-  cmd.entryoff = intern(ctx, ctx.arg.entry)->get_addr(ctx) - ctx.arg.pagezero_size;
+  cmd.entryoff = get_symbol(ctx, ctx.arg.entry)->get_addr(ctx) - ctx.arg.pagezero_size;
   return buf;
 }
 
@@ -375,7 +368,7 @@ OutputSection<E>::get_instance(Context<E> &ctx, std::string_view segname,
     return osec;
 
   OutputSection<E> *osec = new OutputSection<E>(ctx, segname, sectname);
-  ctx.osec_pool.push_back(std::unique_ptr<OutputSection<E>>(osec));
+  ctx.osec_pool.emplace_back(osec);
   return osec;
 }
 
@@ -433,7 +426,7 @@ OutputSegment<E>::get_instance(Context<E> &ctx, std::string_view name) {
     return seg;
 
   OutputSegment<E> *seg = new OutputSegment<E>(name);
-  ctx.segments.push_back(std::unique_ptr<OutputSegment<E>>(seg));
+  ctx.segments.emplace_back(seg);
   return seg;
 }
 
@@ -570,12 +563,12 @@ void OutputRebaseSection<E>::compute_size(Context<E> &ctx) {
             ctx.data_seg->cmd.vmaddr);
 
   for (Symbol<E> *sym : ctx.got.syms)
-    if (!sym->file->is_dylib)
+    if (!sym->file->is_dylib())
       enc.add(ctx.data_const_seg->seg_idx,
               sym->get_got_addr(ctx) - ctx.data_const_seg->cmd.vmaddr);
 
   for (Symbol<E> *sym : ctx.thread_ptrs.syms)
-    if (!sym->file->is_dylib)
+    if (!sym->file->is_dylib())
       enc.add(ctx.data_seg->seg_idx,
               sym->get_tlv_addr(ctx) - ctx.data_seg->cmd.vmaddr);
 
@@ -644,13 +637,13 @@ void OutputBindSection<E>::compute_size(Context<E> &ctx) {
   BindEncoder enc;
 
   for (Symbol<E> *sym : ctx.got.syms)
-    if (sym->file->is_dylib)
+    if (sym->file->is_dylib())
       enc.add(((DylibFile<E> *)sym->file)->dylib_idx, sym->name, 0,
               ctx.data_const_seg->seg_idx,
               sym->get_got_addr(ctx) - ctx.data_const_seg->cmd.vmaddr);
 
   for (Symbol<E> *sym : ctx.thread_ptrs.syms)
-    if (sym->file->is_dylib)
+    if (sym->file->is_dylib())
       enc.add(((DylibFile<E> *)sym->file)->dylib_idx, sym->name, 0,
               ctx.data_seg->seg_idx,
               sym->get_tlv_addr(ctx) - ctx.data_seg->cmd.vmaddr);
@@ -901,15 +894,15 @@ void OutputSymtabSection<E>::copy_buf(Context<E> &ctx) {
     Symbol<E> &sym = *ent.sym;
 
     msym.stroff = ent.stroff;
-    msym.type = (sym.file->is_dylib ? N_UNDF : N_SECT);
+    msym.type = (sym.file->is_dylib() ? N_UNDF : N_SECT);
     msym.ext = sym.is_extern;
 
-    if (!sym.file->is_dylib)
+    if (!sym.file->is_dylib())
       msym.value = sym.get_addr(ctx);
     if (sym.subsec)
       msym.sect = sym.subsec->isec.osec.sect_idx;
 
-    if (sym.file->is_dylib)
+    if (sym.file->is_dylib())
       msym.desc = ((DylibFile<E> *)sym.file)->dylib_idx << 8;
     else if (sym.referenced_dynamically)
       msym.desc = REFERENCED_DYNAMICALLY;
@@ -969,7 +962,8 @@ void OutputIndirectSymtabSection<E>::copy_buf(Context<E> &ctx) {
 
 template <typename E>
 void CodeSignatureSection<E>::compute_size(Context<E> &ctx) {
-  i64 filename_size = align_to(path_filename(ctx.arg.output).size() + 1, 16);
+  std::string filename = filepath(ctx.arg.output).filename();
+  i64 filename_size = align_to(filename.size() + 1, 16);
   i64 num_blocks = align_to(this->hdr.offset, BLOCK_SIZE) / BLOCK_SIZE;
   this->hdr.size = sizeof(CodeSignatureHeader) + sizeof(CodeSignatureBlobIndex) +
                    sizeof(CodeSignatureDirectory) + filename_size +
@@ -980,7 +974,7 @@ template <typename E>
 void CodeSignatureSection<E>::write_signature(Context<E> &ctx) {
   u8 *buf = ctx.buf + this->hdr.offset;
 
-  std::string_view filename = path_filename(ctx.arg.output);
+  std::string filename = filepath(ctx.arg.output).filename();
   i64 filename_size = align_to(filename.size() + 1, 16);
   i64 num_blocks = align_to(this->hdr.offset, BLOCK_SIZE) / BLOCK_SIZE;
 
@@ -1010,7 +1004,7 @@ void CodeSignatureSection<E>::write_signature(Context<E> &ctx) {
   dir.code_limit = this->hdr.offset;
   dir.hash_size = SHA256_SIZE;
   dir.hash_type = CS_HASHTYPE_SHA256;
-  dir.page_size = __builtin_ctz(BLOCK_SIZE);
+  dir.page_size = std::countr_zero<u64>(BLOCK_SIZE);
   dir.exec_seg_base = ctx.text_seg->cmd.fileoff;
   dir.exec_seg_limit = ctx.text_seg->cmd.filesize;
   if (ctx.output_type == MH_EXECUTE)
@@ -1174,13 +1168,13 @@ u32 UnwindEncoder<E>::encode_personality(Context<E> &ctx, Symbol<E> *sym) {
 
   for (i64 i = 0; i < personalities.size(); i++)
     if (personalities[i] == sym)
-      return (i + 1) << __builtin_ctz(UNWIND_PERSONALITY_MASK);
+      return (i + 1) << std::countr_zero(UNWIND_PERSONALITY_MASK);
 
   if (personalities.size() == 3)
     Fatal(ctx) << ": too many personality functions";
 
   personalities.push_back(sym);
-  return personalities.size() << __builtin_ctz(UNWIND_PERSONALITY_MASK);
+  return personalities.size() << std::countr_zero(UNWIND_PERSONALITY_MASK);
 }
 
 template <typename E>
@@ -1246,7 +1240,7 @@ template <typename E>
 void GotSection<E>::copy_buf(Context<E> &ctx) {
   u64 *buf = (u64 *)(ctx.buf + this->hdr.offset);
   for (i64 i = 0; i < syms.size(); i++)
-    if (!syms[i]->file->is_dylib)
+    if (!syms[i]->file->is_dylib())
       buf[i] = syms[i]->get_addr(ctx);
 }
 
@@ -1271,7 +1265,7 @@ template <typename E>
 void ThreadPtrsSection<E>::copy_buf(Context<E> &ctx) {
   u64 *buf = (u64 *)(ctx.buf + this->hdr.offset);
   for (i64 i = 0; i < syms.size(); i++)
-    if (!syms[i]->file->is_dylib)
+    if (!syms[i]->file->is_dylib())
       buf[i] = syms[i]->get_addr(ctx);
 }
 

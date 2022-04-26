@@ -1,27 +1,34 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ..."
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
 which dwarfdump >& /dev/null || { echo skipped; exit; }
 
-cat <<EOF | g++ -c -o $t/a.o -g -gz=zlib-gnu -xc++ -
+cat <<EOF | $CXX -c -o $t/a.o -g -gz=zlib -xc++ -
 int main() {
   return 0;
 }
 EOF
 
-cat <<EOF | g++ -c -o $t/b.o -g -gz=zlib -xc++ -
+cat <<EOF | $CXX -c -o $t/b.o -g -gz=zlib -xc++ -
 int foo() {
   return 0;
 }
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/a.o $t/b.o
+$CC -B. -o $t/exe $t/a.o $t/b.o
 dwarfdump $t/exe > /dev/null
 readelf --sections $t/exe | fgrep -q .debug_info
 

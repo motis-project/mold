@@ -1,13 +1,20 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | clang -fPIC -c -o $t/a.o -xc -
+cat <<EOF | $CC -fPIC -c -o $t/a.o -xc -
 int foo() __attribute__((visibility("protected")));
 int bar() __attribute__((visibility("protected")));
 void *baz() __attribute__((visibility("protected")));
@@ -25,9 +32,9 @@ void *baz() {
 }
 EOF
 
-clang -fuse-ld=$mold -o $t/b.so -shared $t/a.o
+$CC -B. -o $t/b.so -shared $t/a.o
 
-cat <<EOF | cc -c -o $t/c.o -xc - -fno-PIE
+cat <<EOF | $CC -c -o $t/c.o -xc - -fno-PIE
 #include <stdio.h>
 
 int foo() {
@@ -42,7 +49,7 @@ int main() {
 }
 EOF
 
-clang -fuse-ld=$mold -no-pie -o $t/exe $t/c.o $t/b.so
-$t/exe | grep -q '3 4 0'
+$CC -B. -no-pie -o $t/exe $t/c.o $t/b.so
+$QEMU $t/exe | grep -q '3 4 0'
 
 echo OK

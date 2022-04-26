@@ -1,12 +1,14 @@
 #pragma once
 
-#include "byteorder.h"
+#include "big-endian.h"
 
 #include <atomic>
+#include <bit>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <span>
@@ -20,6 +22,12 @@
 #include <tbb/enumerable_thread_specific.h>
 #include <unistd.h>
 #include <vector>
+
+#ifdef NDEBUG
+#  define unreachable() __builtin_unreachable()
+#else
+#  define unreachable() assert(0 && "unreachable")
+#endif
 
 namespace mold {
 
@@ -60,7 +68,7 @@ public:
   }
 
   ~SyncOut() {
-    std::lock_guard lock(mu);
+    std::scoped_lock lock(mu);
     out << ss.str() << "\n";
   }
 
@@ -77,10 +85,17 @@ private:
 };
 
 template <typename C>
+static std::string add_color(C &ctx, std::string msg) {
+  if (ctx.arg.color_diagnostics)
+    return "mold: \033[0;1;31m" + msg + ":\033[0m ";
+  return "mold: " + msg + ": ";
+}
+
+template <typename C>
 class Fatal {
 public:
   Fatal(C &ctx) : out(ctx, std::cerr) {
-    out << "mold: ";
+    out << add_color(ctx, "fatal");
   }
 
   [[noreturn]] ~Fatal() {
@@ -102,8 +117,12 @@ template <typename C>
 class Error {
 public:
   Error(C &ctx) : out(ctx, std::cerr) {
-    out << "mold: ";
-    ctx.has_error = true;
+    if (ctx.arg.noinhibit_exec) {
+      out << add_color(ctx, "warning");
+    } else {
+      out << add_color(ctx, "error");
+      ctx.has_error = true;
+    }
   }
 
   template <class T> Error &operator<<(T &&val) {
@@ -119,9 +138,12 @@ template <typename C>
 class Warn {
 public:
   Warn(C &ctx) : out(ctx, std::cerr) {
-    out << "mold: ";
-    if (ctx.arg.fatal_warnings)
+    if (ctx.arg.fatal_warnings) {
+      out << add_color(ctx, "error");
       ctx.has_error = true;
+    } else {
+      out << add_color(ctx, "warning");
+    }
   }
 
   template <class T> Warn &operator<<(T &&val) {
@@ -133,8 +155,6 @@ private:
   SyncOut<C> out;
 };
 
-#define unreachable() assert(0 && "unreachable")
-
 //
 // Utility functions
 //
@@ -142,12 +162,12 @@ private:
 inline u64 align_to(u64 val, u64 align) {
   if (align == 0)
     return val;
-  assert(__builtin_popcount(align) == 1);
+  assert(std::popcount(align) == 1);
   return (val + align - 1) & ~(align - 1);
 }
 
 inline u64 align_down(u64 val, u64 align) {
-  assert(__builtin_popcount(align) == 1);
+  assert(std::popcount(align) == 1);
   return val & ~(align - 1);
 }
 
@@ -155,7 +175,21 @@ inline u64 next_power_of_two(u64 val) {
   assert(val >> 63 == 0);
   if (val == 0 || val == 1)
     return 1;
-  return (u64)1 << (64 - __builtin_clzl(val - 1));
+  return (u64)1 << (64 - std::countl_zero(val - 1));
+}
+
+template <typename T, typename Compare = std::less<T>>
+void update_minimum(std::atomic<T> &atomic, u64 new_val, Compare cmp = {}) {
+  T old_val = atomic;
+  while (cmp(new_val, old_val) &&
+         !atomic.compare_exchange_weak(old_val, new_val));
+}
+
+template <typename T, typename Compare = std::less<T>>
+void update_maximum(std::atomic<T> &atomic, u64 new_val, Compare cmp = {}) {
+  T old_val = atomic;
+  while (cmp(old_val, new_val) &&
+         !atomic.compare_exchange_weak(old_val, new_val));
 }
 
 template <typename T, typename U>
@@ -169,11 +203,6 @@ inline std::vector<T> flatten(std::vector<std::vector<T>> &vec) {
   for (std::vector<T> &v : vec)
     append(ret, v);
   return ret;
-}
-
-template <typename T, typename U>
-inline void erase(std::vector<T> &vec, U pred) {
-  vec.erase(std::remove_if(vec.begin(), vec.end(), pred), vec.end());
 }
 
 template <typename T>
@@ -251,6 +280,11 @@ std::string_view save_string(C &ctx, const std::string &str) {
 // Concurrent Map
 //
 
+// This is an implementation of a fast concurrent hash map. Unlike
+// ordinary hash tables, this impl just aborts if it becomes full.
+// So you need to give a correct estimation of the final size before
+// using it. We use this hash map to uniquify pieces of data in
+// mergeable sections.
 template <typename T>
 class ConcurrentMap {
 public:
@@ -263,7 +297,7 @@ public:
   ~ConcurrentMap() {
     if (keys) {
       free((void *)keys);
-      free((void *)sizes);
+      free((void *)key_sizes);
       free((void *)values);
     }
   }
@@ -275,7 +309,7 @@ public:
 
     this->nbuckets = nbuckets;
     keys = (std::atomic<const char *> *)calloc(nbuckets, sizeof(keys[0]));
-    sizes = (u32 *)calloc(nbuckets, sizeof(sizes[0]));
+    key_sizes = (u32 *)calloc(nbuckets, sizeof(key_sizes[0]));
     values = (T *)calloc(nbuckets, sizeof(values[0]));
   }
 
@@ -283,29 +317,28 @@ public:
     if (!keys)
       return {nullptr, false};
 
-    assert(__builtin_popcount(nbuckets) == 1);
+    assert(std::popcount<u64>(nbuckets) == 1);
     i64 idx = hash & (nbuckets - 1);
     i64 retry = 0;
 
     while (retry < MAX_RETRY) {
       const char *ptr = keys[idx];
-      if (ptr == locked) {
-#ifdef __x86_64__
-        asm volatile("pause" ::: "memory");
-#endif
+      if (ptr == marker) {
+        pause();
         continue;
       }
 
       if (ptr == nullptr) {
-        if (!keys[idx].compare_exchange_weak(ptr, locked))
+        if (!keys[idx].compare_exchange_weak(ptr, marker))
           continue;
         new (values + idx) T(val);
-        sizes[idx] = key.size();
+        key_sizes[idx] = key.size();
         keys[idx] = key.data();
         return {values + idx, true};
       }
 
-      if (key.size() == sizes[idx] && memcmp(ptr, key.data(), sizes[idx]) == 0)
+      if (key.size() == key_sizes[idx] &&
+          memcmp(ptr, key.data(), key_sizes[idx]) == 0)
         return {values + idx, false};
 
       u64 mask = nbuckets / NUM_SHARDS - 1;
@@ -318,7 +351,7 @@ public:
   }
 
   bool has_key(i64 idx) {
-    return keys[idx];
+    return keys[idx].load(std::memory_order_relaxed);
   }
 
   static constexpr i64 MIN_NBUCKETS = 2048;
@@ -327,56 +360,19 @@ public:
 
   i64 nbuckets = 0;
   std::atomic<const char *> *keys = nullptr;
-  u32 *sizes = nullptr;
+  u32 *key_sizes = nullptr;
   T *values = nullptr;
 
 private:
-  static constexpr const char *locked = "marker";
-};
-
-//
-// Bit vector
-//
-
-class BitVector {
-  class BitRef {
-  public:
-    BitRef(u8 &byte, u8 bitpos) : byte(byte), bitpos(bitpos) {}
-
-    BitRef &operator=(bool val) {
-      if (val)
-        byte |= (1 << bitpos);
-      else
-        byte &= ~(1 << bitpos);
-      return *this;
-    }
-
-    BitRef &operator=(const BitRef &other) {
-      *this = (bool)other;
-      return *this;
-    }
-
-    operator bool() const {
-      return byte & (1 << bitpos);
-    }
-
-  private:
-    u8 &byte;
-    u8 bitpos;
-  };
-
-public:
-  void resize(i64 size) {
-    vec.reset(new u8[(size + 7) / 8]);
-    memset(vec.get(), 0, (size + 7) / 8);
+  static void pause() {
+#if defined(__x86_64__)
+    asm volatile("pause");
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
   }
 
-  BitRef operator[](i64 i) {
-    return BitRef(vec[i / 8], i % 8);
-  }
-
-private:
-  std::unique_ptr<u8[]> vec;
+  static constexpr const char *marker = "marker";
 };
 
 //
@@ -394,18 +390,15 @@ public:
   HyperLogLog() : buckets(NBUCKETS) {}
 
   void insert(u32 hash) {
-    merge_one(hash & (NBUCKETS - 1), __builtin_clz(hash) + 1);
-  }
-
-  void merge_one(i64 idx, u8 newval) {
-    u8 cur = buckets[idx];
-    while (cur < newval)
-      if (buckets[idx].compare_exchange_strong(cur, newval))
-        break;
+    update_maximum(buckets[hash & (NBUCKETS - 1)], std::countl_zero(hash) + 1);
   }
 
   i64 get_cardinality() const;
-  void merge(const HyperLogLog &other);
+
+  void merge(const HyperLogLog &other) {
+    for (i64 i = 0; i < NBUCKETS; i++)
+      update_maximum(buckets[i], other.buckets[i]);
+  }
 
 private:
   static constexpr i64 NBUCKETS = 2048;
@@ -418,15 +411,14 @@ private:
 // filepath.cc
 //
 
-// These are various utility functions to deal with file pathnames.
-std::string get_current_dir();
+template <typename T>
+std::filesystem::path filepath(const T &path) {
+  return {path, std::filesystem::path::format::generic_format};
+}
+
 std::string get_realpath(std::string_view path);
-bool path_is_dir(std::string_view path);
-std::string_view path_dirname(std::string_view path);
-std::string_view path_filename(std::string_view path);
-std::string_view path_basename(std::string_view path);
-std::string path_to_absolute(std::string_view path);
 std::string path_clean(std::string_view path);
+std::filesystem::path to_abs_path(std::filesystem::path path);
 
 //
 // demangle.cc
@@ -440,7 +432,7 @@ std::string_view demangle(std::string_view name);
 
 class ZlibCompressor {
 public:
-  ZlibCompressor(std::string_view input);
+  ZlibCompressor(u8 *buf, i64 size);
   void write_to(u8 *buf);
   i64 size() const;
 
@@ -470,7 +462,7 @@ class Counter {
 public:
   Counter(std::string_view name, i64 value = 0) : name(name), values(value) {
     static std::mutex mu;
-    std::lock_guard lock(mu);
+    std::scoped_lock lock(mu);
     instances.push_back(this);
   }
 
@@ -526,6 +518,8 @@ public:
     ctx.timer_records.push_back(std::unique_ptr<TimerRecord>(record));
   }
 
+  Timer(const Timer &) = delete;
+
   ~Timer() {
     record->stop();
   }
@@ -544,24 +538,24 @@ private:
 
 // TarFile is a class to create a tar file.
 //
-// If you pass `--reproduce=repro.tar` to mold, mold collects all
-// input files and put them into `repro.tar`, so that it is easy to
+// If you pass `--repro` to mold, mold collects all input files and
+// put them into `<output-file-path>.repro.tar`, so that it is easy to
 // run the same command with the same command line arguments.
-class TarFile {
+class TarWriter {
 public:
-  TarFile(std::string basedir) : basedir(basedir) {}
+  static std::unique_ptr<TarWriter>
+  open(std::string output_path, std::string basedir);
+
+  ~TarWriter();
   void append(std::string path, std::string_view data);
-  void write_to(u8 *buf);
-  i64 size() const { return size_; }
 
 private:
   static constexpr i64 BLOCK_SIZE = 512;
 
-  std::string encode_path(std::string path);
+  TarWriter(FILE *out, std::string basedir) : out(out), basedir(basedir) {}
 
+  FILE *out = nullptr;
   std::string basedir;
-  std::vector<std::pair<std::string, std::string_view>> contents;
-  i64 size_ = BLOCK_SIZE * 2;
 };
 
 //
@@ -584,12 +578,19 @@ public:
     return std::string_view((char *)data, size);
   }
 
-  bool write_to(std::string path) {
-    FILE *fp = fopen(path.c_str(), "w");
-    if (!fp)
-      return false;
-    fwrite(data, size, 1, fp);
-    return true;
+  i64 get_offset() const {
+    return parent ? (data - parent->data + parent->get_offset()) : 0;
+  }
+
+  // Returns a string that uniquely identify a file that is possibly
+  // in an archive.
+  std::string get_identifier() const {
+    if (parent) {
+      // We use the file offset within an archive as an identifier
+      // because archive members may have the same name.
+      return parent->name + ":" + std::to_string(get_offset());
+    }
+    return name;
   }
 
   std::string name;
@@ -598,15 +599,11 @@ public:
   i64 mtime = 0;
   bool given_fullpath = true;
   MappedFile *parent = nullptr;
+  int fd = -1;
 };
 
 template <typename C>
 MappedFile<C> *MappedFile<C>::open(C &ctx, std::string path) {
-  MappedFile *mf = new MappedFile;
-  mf->name = path;
-
-  ctx.mf_pool.push_back(std::unique_ptr<MappedFile>(mf));
-
   if (path.starts_with('/') && !ctx.arg.chroot.empty())
     path = ctx.arg.chroot + "/" + path_clean(path);
 
@@ -618,6 +615,10 @@ MappedFile<C> *MappedFile<C>::open(C &ctx, std::string path) {
   if (fstat(fd, &st) == -1)
     Fatal(ctx) << path << ": fstat failed: " << errno_string();
 
+  MappedFile *mf = new MappedFile;
+  ctx.mf_pool.push_back(std::unique_ptr<MappedFile>(mf));
+
+  mf->name = path;
   mf->size = st.st_size;
 
 #ifdef __APPLE__
@@ -640,7 +641,7 @@ template <typename C>
 MappedFile<C> *MappedFile<C>::must_open(C &ctx, std::string path) {
   if (MappedFile *mf = MappedFile::open(ctx, path))
     return mf;
-  Fatal(ctx) << "cannot open " << path;
+  Fatal(ctx) << "cannot open " << path << ": " << errno_string();
 }
 
 template <typename C>

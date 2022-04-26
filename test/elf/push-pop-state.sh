@@ -1,25 +1,32 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | clang -shared -o $t/a.so -xc -
+cat <<EOF | $CC -shared -o $t/a.so -xc -
 int foo = 1;
 EOF
 
-cat <<EOF | clang -shared -o $t/b.so -xc -
+cat <<EOF | $CC -shared -o $t/b.so -xc -
 int bar = 1;
 EOF
 
-cat <<EOF | clang -c -o $t/c.o -xc -
+cat <<EOF | $CC -c -o $t/c.o -xc -
 int main() {}
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/c.o -Wl,-as-needed \
+$CC -B. -o $t/exe $t/c.o -Wl,-as-needed \
   -Wl,-push-state -Wl,-no-as-needed $t/a.so -Wl,-pop-state $t/b.so
 
 readelf --dynamic $t/exe > $t/log

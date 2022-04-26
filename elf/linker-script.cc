@@ -146,9 +146,9 @@ read_output_format(Context<E> &ctx, std::span<std::string_view> tok) {
 
 template <typename E>
 static bool is_in_sysroot(Context<E> &ctx, std::string path) {
-  std::string sysroot = path_clean(path_to_absolute(ctx.arg.sysroot));
-  path = path_clean(path_to_absolute(path));
-  return path_dirname(path).starts_with(sysroot);
+  std::string rel =
+    to_abs_path(path).lexically_relative(to_abs_path(ctx.arg.sysroot));
+  return rel != "." && !rel.starts_with("../");
 }
 
 template <typename E>
@@ -160,15 +160,24 @@ static MappedFile<Context<E>> *resolve_path(Context<E> &ctx, std::string_view to
   if (str.starts_with('/') && is_in_sysroot(ctx, current_file<E>->name))
     return MappedFile<Context<E>>::must_open(ctx, ctx.arg.sysroot + str);
 
+  if (str.starts_with('=')) {
+    std::string path;
+    if (ctx.arg.sysroot.empty())
+      path = str.substr(1);
+    else
+      path = ctx.arg.sysroot + str.substr(1);
+    return MappedFile<Context<E>>::must_open(ctx, path);
+  }
+
   if (str.starts_with("-l"))
     return find_library(ctx, str.substr(2));
 
-  if (MappedFile<Context<E>> *mf = MappedFile<Context<E>>::open(ctx, str))
+  if (MappedFile<Context<E>> *mf = open_library(ctx, str))
     return mf;
 
   for (std::string_view dir : ctx.arg.library_paths) {
     std::string path = std::string(dir) + "/" + str;
-    if (MappedFile<Context<E>> *mf = MappedFile<Context<E>>::open(ctx, path))
+    if (MappedFile<Context<E>> *mf = open_library(ctx, path))
       return mf;
   }
 
@@ -257,7 +266,7 @@ static bool read_label(std::span<std::string_view> &tok,
 template <typename E>
 static void
 read_version_script_commands(Context<E> &ctx, std::span<std::string_view> &tok,
-                             VersionPattern &pat, bool is_extern_cpp) {
+                             u16 ver_idx, bool is_cpp) {
   bool is_global = true;
 
   while (!tok.empty() && tok[0] != "}") {
@@ -274,28 +283,28 @@ read_version_script_commands(Context<E> &ctx, std::span<std::string_view> &tok,
     if (tok[0] == "extern") {
       tok = tok.subspan(1);
 
-      bool is_cpp;
       if (!tok.empty() && tok[0] == "\"C\"") {
         tok = tok.subspan(1);
-        is_cpp = false;
+        tok = skip(ctx, tok, "{");
+        read_version_script_commands( ctx, tok, ver_idx, false);
       } else {
         tok = skip(ctx, tok, "\"C++\"");
-        is_cpp = true;
+        tok = skip(ctx, tok, "{");
+        read_version_script_commands(ctx, tok, ver_idx, true);
       }
 
-      tok = skip(ctx, tok, "{");
-      read_version_script_commands(ctx, tok, pat, is_cpp);
       tok = skip(ctx, tok, "}");
       tok = skip(ctx, tok, ";");
       continue;
     }
 
-    if (tok[0] == "*")
-      ctx.arg.default_version = (is_global ? pat.ver_idx : VER_NDX_LOCAL);
-    else if (is_extern_cpp)
-      pat.cpp_patterns.push_back(tok[0]);
-    else
-      pat.patterns.push_back(tok[0]);
+    if (tok[0] == "*") {
+      ctx.default_version = (is_global ? ver_idx : VER_NDX_LOCAL);
+    } else if (is_global) {
+      ctx.version_patterns.push_back({unquote(tok[0]), ver_idx, is_cpp});
+    } else {
+      ctx.version_patterns.push_back({unquote(tok[0]), VER_NDX_LOCAL, is_cpp});
+    }
 
     tok = tok.subspan(1);
 
@@ -307,27 +316,24 @@ read_version_script_commands(Context<E> &ctx, std::span<std::string_view> &tok,
 
 template <typename E>
 void read_version_script(Context<E> &ctx, std::span<std::string_view> &tok) {
-  i16 next_ver = VER_NDX_LAST_RESERVED + 1;
+  u16 next_ver = VER_NDX_LAST_RESERVED + ctx.arg.version_definitions.size() + 1;
 
   while (!tok.empty() && tok[0] != "}") {
-    VersionPattern pat;
-
+    u16 ver_idx;
     if (tok[0] == "{") {
-      pat.ver_idx = VER_NDX_GLOBAL;
+      ver_idx = VER_NDX_GLOBAL;
     } else {
-      pat.ver_idx = next_ver++;
-      ctx.arg.version_definitions.push_back(tok[0]);
+      ver_idx = next_ver++;
+      ctx.arg.version_definitions.push_back(std::string(tok[0]));
       tok = tok.subspan(1);
     }
 
     tok = skip(ctx, tok, "{");
-    read_version_script_commands(ctx, tok, pat, false);
+    read_version_script_commands(ctx, tok, ver_idx, false);
     tok = skip(ctx, tok, "}");
     if (!tok.empty() && tok[0] != ";")
       tok = tok.subspan(1);
     tok = skip(ctx, tok, ";");
-
-    ctx.arg.version_patterns.push_back(pat);
   }
 }
 
@@ -343,39 +349,45 @@ void parse_version_script(Context<E> &ctx, std::string path) {
 }
 
 template <typename E>
+void read_dynamic_list_commands(Context<E> &ctx, std::span<std::string_view> &tok,
+                                bool is_cpp) {
+  while (!tok.empty() && tok[0] != "}") {
+    if (tok[0] == "extern") {
+      tok = tok.subspan(1);
+
+      if (!tok.empty() && tok[0] == "\"C\"") {
+        tok = tok.subspan(1);
+        tok = skip(ctx, tok, "{");
+        read_dynamic_list_commands(ctx, tok, false);
+      } else {
+        tok = skip(ctx, tok, "\"C++\"");
+        tok = skip(ctx, tok, "{");
+        read_dynamic_list_commands(ctx, tok, true);
+      }
+
+      tok = skip(ctx, tok, "}");
+      tok = skip(ctx, tok, ";");
+      continue;
+    }
+
+    if (tok[0] == "*")
+      ctx.default_version = VER_NDX_GLOBAL;
+    else
+      ctx.version_patterns.push_back({unquote(tok[0]), VER_NDX_GLOBAL, is_cpp});
+
+    tok = skip(ctx, tok.subspan(1), ";");
+  }
+}
+
+template <typename E>
 void parse_dynamic_list(Context<E> &ctx, std::string path) {
   current_file<E> = MappedFile<Context<E>>::must_open(ctx, path);
   std::vector<std::string_view> vec =
     tokenize(ctx, current_file<E>->get_contents());
 
   std::span<std::string_view> tok = vec;
-
   tok = skip(ctx, tok, "{");
-  i16 ver = VER_NDX_GLOBAL;
-
-  while (!tok.empty() && tok[0] != "}") {
-    if (read_label(tok, "global")) {
-      ver = VER_NDX_GLOBAL;
-      continue;
-    }
-
-    if (read_label(tok, "local")) {
-      ver = VER_NDX_LOCAL;
-      continue;
-    }
-
-    if (tok[0] == "*") {
-      ctx.arg.default_version = ver;
-    } else {
-      VersionPattern pat;
-      pat.ver_idx = ver;
-      pat.patterns.push_back(tok[0]);
-      ctx.arg.version_patterns.push_back(pat);
-    }
-
-    tok = skip(ctx, tok.subspan(1), ";");
-  }
-
+  read_dynamic_list_commands(ctx, tok, false);
   tok = skip(ctx, tok, "}");
   tok = skip(ctx, tok, ";");
 
@@ -393,8 +405,6 @@ void parse_dynamic_list(Context<E> &ctx, std::string path) {
   template                                                              \
   void parse_dynamic_list(Context<E> &ctx, std::string path)
 
-INSTANTIATE(X86_64);
-INSTANTIATE(I386);
-INSTANTIATE(ARM64);
+INSTANTIATE_ALL;
 
 } // namespace mold::elf

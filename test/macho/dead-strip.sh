@@ -1,13 +1,20 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../ld64.mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/macho/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/ld64.mold"
+t=out/test/macho/$testname
 mkdir -p $t
 
-cat <<EOF | cc -o $t/a.o -c -xc -
+cat <<EOF | $CC -o $t/a.o -c -xc -
 #include <stdio.h>
 
 char msg1[] = "Hello world";
@@ -26,8 +33,8 @@ int main() {
 }
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/a.o -Wl,-dead_strip
-$t/exe | grep -q 'Hello world'
+clang -fuse-ld="$mold" -o $t/exe $t/a.o -Wl,-dead_strip
+$QEMU $t/exe | grep -q 'Hello world'
 otool -tVj $t/exe > $t/log
 grep -q 'hello:' $t/log
 ! grep -q 'howdy:' $t/log || false

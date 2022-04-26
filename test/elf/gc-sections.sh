@@ -1,10 +1,17 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
 cat <<EOF > $t/a.cc
@@ -28,9 +35,8 @@ int main() {
 }
 EOF
 
-cflags="-ffunction-sections -fdata-sections -fuse-ld=$mold"
+$CXX -B. -o $t/exe1 $t/a.cc -ffunction-sections -fdata-sections
 
-clang++ -o $t/exe1 $t/a.cc $cflags
 readelf --symbols $t/exe1 > $t/log.1
 grep -qv live_fn1 $t/log.1
 grep -qv live_fn2 $t/log.1
@@ -40,9 +46,10 @@ grep -qv live_var1 $t/log.1
 grep -qv live_var2 $t/log.1
 grep -qv dead_var1 $t/log.1
 grep -qv dead_var2 $t/log.1
-$t/exe1 | grep -q '1 2'
+$QEMU $t/exe1 | grep -q '1 2'
 
-clang++ -o $t/exe2 $t/a.cc $cflags -Wl,-gc-sections
+$CXX -B. -o $t/exe2 $t/a.cc -ffunction-sections -fdata-sections -Wl,-gc-sections
+
 readelf --symbols $t/exe2 > $t/log.2
 grep -q  live_fn1 $t/log.2
 grep -q  live_fn2 $t/log.2
@@ -52,6 +59,6 @@ grep -q  live_var1 $t/log.2
 grep -q  live_var2 $t/log.2
 grep -qv dead_var1 $t/log.2
 grep -qv dead_var2 $t/log.2
-$t/exe2 | grep -q '1 2'
+$QEMU $t/exe2 | grep -q '1 2'
 
 echo OK

@@ -1,26 +1,33 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | clang -c -o $t/a.o -xc -
+cat <<EOF | $CC -c -o $t/a.o -xc -
 int foo();
 int main() {
   foo();
 }
 EOF
 
-! clang -fuse-ld=$mold -o $t/exe $t/a.o 2>&1 \
+! $CC -B. -o $t/exe $t/a.o 2>&1 \
   | grep -q 'undefined symbol:.*foo'
 
-clang -fuse-ld=$mold -o $t/exe $t/a.o --warn-unresolved-symbols 2>&1 \
+$CC -B. -o $t/exe $t/a.o -Wl,-warn-unresolved-symbols 2>&1 \
   | grep -q 'undefined symbol:.*foo'
 
-! clang -fuse-ld=$mold -o $t/exe $t/a.o --warn-unresolved-symbols \
+! $CC -B. -o $t/exe $t/a.o -Wl,-warn-unresolved-symbols \
   --error-unresolved-symbols 2>&1 \
   | grep -q 'undefined symbol:.*foo'
 

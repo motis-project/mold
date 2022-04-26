@@ -1,13 +1,20 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | clang -c -o $t/a.o -xc -
+cat <<EOF | $CC -c -o $t/a.o -xc -
 #include <stdio.h>
 
 void foo() {
@@ -15,7 +22,7 @@ void foo() {
 }
 EOF
 
-cat <<EOF | clang -c -o $t/b.o -xc -
+cat <<EOF | $CC -c -o $t/b.o -xc -
 #include <stdio.h>
 
 void foo();
@@ -29,7 +36,7 @@ int main() {
 }
 EOF
 
-cat <<EOF | clang -c -o $t/c.o -xc -
+cat <<EOF | $CC -c -o $t/c.o -xc -
 #include <stdio.h>
 
 void __real_foo();
@@ -39,13 +46,13 @@ int main() {
 }
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/a.o $t/b.o
-$t/exe | grep -q '^foo$'
+$CC -B. -o $t/exe $t/a.o $t/b.o
+$QEMU $t/exe | grep -q '^foo$'
 
-clang -fuse-ld=$mold -o $t/exe $t/a.o $t/b.o -Wl,-wrap,foo
-$t/exe | grep -q '^wrap_foo$'
+$CC -B. -o $t/exe $t/a.o $t/b.o -Wl,-wrap,foo
+$QEMU $t/exe | grep -q '^wrap_foo$'
 
-clang -fuse-ld=$mold -o $t/exe $t/a.o $t/c.o -Wl,-wrap,foo
-$t/exe | grep -q '^foo$'
+$CC -B. -o $t/exe $t/a.o $t/c.o -Wl,-wrap,foo
+$QEMU $t/exe | grep -q '^foo$'
 
 echo OK

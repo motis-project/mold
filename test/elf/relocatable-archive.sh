@@ -1,28 +1,35 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | cc -c -o $t/a.o -xc -
+cat <<EOF | $CC -c -o $t/a.o -xc -
 void bar();
 void foo() {
   bar();
 }
 EOF
 
-cat <<EOF | cc -c -o $t/b.o -xc -
+cat <<EOF | $CC -c -o $t/b.o -xc -
 void bar() {}
 EOF
 
-cat <<EOF | cc -c -o $t/c.o -xc -
+cat <<EOF | $CC -c -o $t/c.o -xc -
 void baz() {}
 EOF
 
-cat <<EOF | cc -c -o $t/d.o -xc -
+cat <<EOF | $CC -c -o $t/d.o -xc -
 void foo();
 int main() {
   foo();
@@ -30,7 +37,7 @@ int main() {
 EOF
 
 ar crs $t/e.a $t/a.o $t/b.o $t/c.o
-$mold -r -o $t/f.o $t/d.o $t/e.a
+"$mold" -r -o $t/f.o $t/d.o $t/e.a
 
 readelf --symbols $t/f.o > $t/log
 grep -q 'foo$' $t/log

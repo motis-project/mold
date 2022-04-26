@@ -1,26 +1,33 @@
 #!/bin/bash
-export LANG=
+export LC_ALL=C
 set -e
-cd $(dirname $0)
-mold=`pwd`/../../mold
-echo -n "Testing $(basename -s .sh $0) ... "
-t=$(pwd)/../../out/test/elf/$(basename -s .sh $0)
+CC="${CC:-cc}"
+CXX="${CXX:-c++}"
+GCC="${GCC:-gcc}"
+GXX="${GXX:-g++}"
+OBJDUMP="${OBJDUMP:-objdump}"
+MACHINE="${MACHINE:-$(uname -m)}"
+testname=$(basename "$0" .sh)
+echo -n "Testing $testname ... "
+cd "$(dirname "$0")"/../..
+mold="$(pwd)/mold"
+t=out/test/elf/$testname
 mkdir -p $t
 
-cat <<EOF | cc -shared -fPIC -o $t/a.so -xc -
+cat <<EOF | $CC -shared -fPIC -o $t/a.so -xc -
 int foo() { return 3; }
 EOF
 
-cat <<EOF | cc -shared -fPIC -o $t/b.so -xc -
+cat <<EOF | $CC -shared -fPIC -o $t/b.so -xc -
 int bar() { return 3; }
 EOF
 
-cat <<EOF | cc -shared -fPIC -o $t/c.so -xc -
+cat <<EOF | $CC -shared -fPIC -o $t/c.so -xc -
 int foo();
 int baz() { return foo(); }
 EOF
 
-cat <<EOF | cc -c -o $t/d.o -xc -
+cat <<EOF | $CC -c -o $t/d.o -xc -
 #include <stdio.h>
 int baz();
 int main() {
@@ -28,7 +35,7 @@ int main() {
 }
 EOF
 
-clang -fuse-ld=$mold -o $t/exe $t/d.o -Wl,--as-needed \
+$CC -B. -o $t/exe $t/d.o -Wl,--as-needed \
   $t/c.so $t/b.so $t/a.so
 
 readelf --dynamic $t/exe > $t/log

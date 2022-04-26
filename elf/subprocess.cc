@@ -1,19 +1,16 @@
 #include "mold.h"
+#include "../sha.h"
 
+#include <filesystem>
 #include <signal.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-#ifdef __APPLE__
-#  define COMMON_DIGEST_FOR_OPENSSL
-#  include <CommonCrypto/CommonDigest.h>
-#else
-#  include <openssl/sha.h>
-#endif
 
 #define DAEMON_TIMEOUT 30
 
@@ -56,7 +53,7 @@ std::function<void()> fork_child() {
   // Child
   close(pipefd[0]);
 
-  return [=]() {
+  return [=] {
     char buf[] = {1};
     int n = write(pipefd[1], buf, 1);
     assert(n == 1);
@@ -215,7 +212,7 @@ void daemonize(Context<E> &ctx, std::function<void()> *wait_for_client,
 
   static i64 conn = -1;
 
-  *wait_for_client = [=, &ctx]() {
+  *wait_for_client = [=, &ctx] {
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(sock, &rfds);
@@ -242,43 +239,37 @@ void daemonize(Context<E> &ctx, std::function<void()> *wait_for_client,
     dup2(recv_fd(ctx, conn), STDERR_FILENO);
   };
 
-  *on_complete = [=]() {
+  *on_complete = [=] {
     char buf[] = {1};
     int n = write(conn, buf, 1);
     assert(n == 1);
   };
 }
 
-template <typename E>
-static std::string get_self_path(Context<E> &ctx) {
-  char buf[4096];
-  size_t n = readlink("/proc/self/exe", buf, sizeof(buf));
-  if (n == -1)
-    Fatal(ctx) << "readlink(\"/proc/self/exe\") failed: " << errno_string();
-  if (n == sizeof(buf))
-    Fatal(ctx) << "readlink: path too long";
-  return {buf, n};
-}
-
-static bool is_regular_file(const std::string &path) {
-  struct stat st;
-  return !stat(path.c_str(), &st) && (st.st_mode & S_IFMT) == S_IFREG;
+static std::string get_self_path() {
+  return std::filesystem::read_symlink("/proc/self/exe");
 }
 
 template <typename E>
-std::string find_dso(Context<E> &ctx, const std::string &self) {
+std::string find_dso(Context<E> &ctx, std::filesystem::path self) {
   // Look for mold-wrapper.so from the same directory as the executable is.
-  std::string path = std::string(path_dirname(self)) + "/mold-wrapper.so";
-  if (is_regular_file(path))
+  std::filesystem::path path = self.parent_path() / "mold-wrapper.so";
+  std::error_code ec;
+  if (std::filesystem::is_regular_file(path, ec) && !ec)
     return path;
 
 #ifdef LIBDIR
   // If not found, search $(LIBDIR)/mold, which is /usr/local/lib/mold
   // by default.
-  path = path_clean(LIBDIR "/mold/mold-wrapper.so");
-  if (is_regular_file(path))
+  path = LIBDIR "/mold/mold-wrapper.so";
+  if (std::filesystem::is_regular_file(path, ec) && !ec)
     return path;
 #endif
+
+  // Look for ../lib/mold/mold-wrapper.so
+  path = self.parent_path() / "../lib/mold/mold-wrapper.so";
+  if (std::filesystem::is_regular_file(path, ec) && !ec)
+    return path;
 
   Fatal(ctx) << "mold-wrapper.so is missing";
 }
@@ -292,7 +283,7 @@ void process_run_subcommand(Context<E> &ctx, int argc, char **argv) {
     Fatal(ctx) << "-run: argument missing";
 
   // Get the mold-wrapper.so path
-  std::string self = get_self_path(ctx);
+  std::string self = get_self_path();
   std::string dso_path = find_dso(ctx, self);
 
   // Set environment variables
@@ -300,11 +291,12 @@ void process_run_subcommand(Context<E> &ctx, int argc, char **argv) {
   putenv(strdup(("MOLD_PATH=" + self).c_str()));
 
   // If ld, ld.lld or ld.gold is specified, run mold itself
-  if (std::string_view cmd = path_basename(argv[2]);
+  if (std::string cmd = filepath(argv[2]).filename();
       cmd == "ld" || cmd == "ld.lld" || cmd == "ld.gold") {
     std::vector<char *> args;
     args.push_back(argv[0]);
     args.insert(args.end(), argv + 3, argv + argc);
+    args.push_back(nullptr);
     execv(self.c_str(), args.data());
     Fatal(ctx) << "mold -run failed: " << self << ": " << errno_string();
   }
@@ -320,8 +312,6 @@ void process_run_subcommand(Context<E> &ctx, int argc, char **argv) {
                           std::function<void()> *);                     \
   template void process_run_subcommand(Context<E> &, int, char **)
 
-INSTANTIATE(X86_64);
-INSTANTIATE(I386);
-INSTANTIATE(ARM64);
+INSTANTIATE_ALL;
 
 } // namespace mold::elf

@@ -4,19 +4,18 @@
 #include <cstring>
 #include <signal.h>
 
+#ifdef USE_SYSTEM_MIMALLOC
+#include <mimalloc-new-delete.h>
+#endif
+
 namespace mold {
 
-std::string_view errno_string() {
-  static thread_local char buf[200];
-  strerror_r(errno, buf, sizeof(buf));
-  return buf;
-}
-
-const std::string mold_version =
 #ifdef GIT_HASH
-  "mold " MOLD_VERSION " (" GIT_HASH "; compatible with GNU ld and GNU gold)";
+const std::string mold_version =
+  "mold " MOLD_VERSION " (" GIT_HASH "; compatible with GNU ld)";
 #else
-  "mold " MOLD_VERSION " (compatible with GNU ld and GNU gold)";
+const std::string mold_version =
+  "mold " MOLD_VERSION " (compatible with GNU ld)";
 #endif
 
 void cleanup() {
@@ -39,7 +38,7 @@ void install_signal_handler() {
 } // namespace mold
 
 int main(int argc, char **argv) {
-  std::string_view cmd = mold::path_filename(argv[0]);
+  std::string cmd = mold::filepath(argv[0]).filename();
 
   if (cmd == "ld64" || cmd == "ld64.mold")
     return mold::macho::main(argc, argv);

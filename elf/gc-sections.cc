@@ -11,24 +11,28 @@ namespace mold::elf {
 
 template <typename E>
 static bool is_init_fini(const InputSection<E> &isec) {
-  return isec.shdr.sh_type == SHT_INIT_ARRAY ||
-         isec.shdr.sh_type == SHT_FINI_ARRAY ||
-         isec.shdr.sh_type == SHT_PREINIT_ARRAY ||
-         isec.name().starts_with(".ctors") ||
-         isec.name().starts_with(".dtors") ||
-         isec.name().starts_with(".init") ||
-         isec.name().starts_with(".fini");
+  u32 type = isec.shdr().sh_type;
+  std::string_view name = isec.name();
+
+  return type == SHT_INIT_ARRAY ||
+         type == SHT_FINI_ARRAY ||
+         type == SHT_PREINIT_ARRAY ||
+         (std::is_same_v<E, ARM32> && type == SHT_ARM_EXIDX) ||
+         name.starts_with(".ctors") ||
+         name.starts_with(".dtors") ||
+         name.starts_with(".init") ||
+         name.starts_with(".fini");
 }
 
 template <typename E>
 static bool mark_section(InputSection<E> *isec) {
-  return isec && isec->is_alive && !isec->is_visited.exchange(true);
+  return isec && isec->is_alive && !isec->extra().is_visited.exchange(true);
 }
 
 template <typename E>
 static void visit(Context<E> &ctx, InputSection<E> *isec,
                   tbb::feeder<InputSection<E> *> &feeder, i64 depth) {
-  assert(isec->is_visited);
+  assert(isec->extra().is_visited);
 
   // A relocation can refer either a section fragment (i.e. a piece of
   // string in a mergeable string section) or a symbol. Mark all
@@ -41,10 +45,10 @@ static void visit(Context<E> &ctx, InputSection<E> *isec,
   // describing how to handle exceptions for that function.
   // We want to keep associated .eh_frame records.
   for (FdeRecord<E> &fde : isec->get_fdes())
-    for (ElfRel<E> &rel : fde.get_rels().subspan(1))
+    for (ElfRel<E> &rel : fde.get_rels(isec->file).subspan(1))
       if (Symbol<E> *sym = isec->file.symbols[rel.r_sym])
-        if (mark_section(sym->input_section))
-          feeder.add(sym->input_section);
+        if (mark_section(sym->get_input_section()))
+          feeder.add(sym->get_input_section());
 
   for (ElfRel<E> &rel : isec->get_rels(ctx)) {
     Symbol<E> &sym = *isec->file.symbols[rel.r_sym];
@@ -56,15 +60,15 @@ static void visit(Context<E> &ctx, InputSection<E> *isec,
       continue;
     }
 
-    if (!mark_section(sym.input_section))
+    if (!mark_section(sym.get_input_section()))
       continue;
 
     // Mark a section alive. For better performacne, we don't call
     // `feeder.add` too often.
     if (depth < 3)
-      visit(ctx, sym.input_section, feeder, depth + 1);
+      visit(ctx, sym.get_input_section(), feeder, depth + 1);
     else
-      feeder.add(sym.input_section);
+      feeder.add(sym.get_input_section());
   }
 }
 
@@ -84,7 +88,7 @@ collect_root_set(Context<E> &ctx) {
       if (SectionFragment<E> *frag = sym->get_frag())
         frag->is_alive.store(true, std::memory_order_relaxed);
       else
-        enqueue_section(sym->input_section);
+        enqueue_section(sym->get_input_section());
     }
   };
 
@@ -98,11 +102,11 @@ collect_root_set(Context<E> &ctx) {
       // reduce the amount of non-memory-mapped segments, you should
       // use `strip` command, compile without debug info or use
       // -strip-all linker option.
-      if (!(isec->shdr.sh_flags & SHF_ALLOC))
-        isec->is_visited = true;
+      if (!(isec->shdr().sh_flags & SHF_ALLOC))
+        isec->extra().is_visited = true;
 
       if (is_init_fini(*isec) || is_c_identifier(isec->name()) ||
-          isec->shdr.sh_type == SHT_NOTE)
+          isec->shdr().sh_type == SHT_NOTE)
         enqueue_section(isec.get());
     }
   });
@@ -115,13 +119,13 @@ collect_root_set(Context<E> &ctx) {
   });
 
   // Add sections referenced by root symbols.
-  enqueue_symbol(intern(ctx, ctx.arg.entry));
+  enqueue_symbol(get_symbol(ctx, ctx.arg.entry));
 
   for (std::string_view name : ctx.arg.undefined)
-    enqueue_symbol(intern(ctx, name));
+    enqueue_symbol(get_symbol(ctx, name));
 
   for (std::string_view name : ctx.arg.require_defined)
-    enqueue_symbol(intern(ctx, name));
+    enqueue_symbol(get_symbol(ctx, name));
 
   // .eh_frame consists of variable-length records called CIE and FDE
   // records, and they are a unit of inclusion or exclusion.
@@ -155,7 +159,7 @@ static void sweep(Context<E> &ctx) {
 
   tbb::parallel_for_each(ctx.objs, [&](ObjectFile<E> *file) {
     for (std::unique_ptr<InputSection<E>> &isec : file->sections) {
-      if (isec && isec->is_alive && !isec->is_visited) {
+      if (isec && isec->is_alive && !isec->extra().is_visited) {
         if (ctx.arg.print_gc_sections)
           SyncOut(ctx) << "removing unused section " << *isec;
         isec->kill();
@@ -172,15 +176,20 @@ static void mark_nonalloc_fragments(Context<E> &ctx) {
   Timer t(ctx, "mark_nonalloc_fragments");
 
   tbb::parallel_for_each(ctx.objs, [](ObjectFile<E> *file) {
-    for (SectionFragment<E> *frag : file->fragments)
-      if (!(frag->output_section.shdr.sh_flags & SHF_ALLOC))
-        frag->is_alive.store(true, std::memory_order_relaxed);
+    for (std::unique_ptr<MergeableSection<E>> &m : file->mergeable_sections)
+      if (m)
+        for (SectionFragment<E> *frag : m->fragments)
+          if (!(frag->output_section.shdr.sh_flags & SHF_ALLOC))
+            frag->is_alive.store(true, std::memory_order_relaxed);
   });
 }
 
 template <typename E>
 void gc_sections(Context<E> &ctx) {
   Timer t(ctx, "gc");
+
+  for (ObjectFile<E> *file : ctx.objs)
+    file->extras.resize(file->sections.size());
 
   mark_nonalloc_fragments(ctx);
 
@@ -192,8 +201,6 @@ void gc_sections(Context<E> &ctx) {
 #define INSTANTIATE(E)                                  \
   template void gc_sections(Context<E> &ctx);
 
-INSTANTIATE(X86_64);
-INSTANTIATE(I386);
-INSTANTIATE(ARM64);
+INSTANTIATE_ALL;
 
 } // namespace mold::elf
